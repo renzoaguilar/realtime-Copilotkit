@@ -3,7 +3,7 @@
 import {
   ChangeEvent,
   FormEvent,
-  useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState
@@ -11,6 +11,7 @@ import {
 import {
   AlertCircle,
   Circle,
+  ListChecks,
   LoaderCircle,
   Mic,
   MicOff,
@@ -29,25 +30,48 @@ import {
   type TransportEvent
 } from "@openai/agents/realtime";
 import {
+  ActionMessage,
+  useActionBridgeStore
+} from "@/components/actions/action-workbench";
+import { createRealtimeActionTools } from "@/lib/actions/realtime-tools";
+import {
+  getActionAnchors,
   mergeHistoryAndDrafts,
   normalizeRealtimeHistory,
   type TranscriptEntry
 } from "@/lib/realtime/history";
+import { genericActionCatalog } from "@/lib/actions/action-catalog";
+import type { ActionCall } from "@/stores/action-bridge-store";
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
+type TimelineEntry =
+  | { type: "transcript"; id: string; createdAt: number; entry: TranscriptEntry }
+  | {
+      type: "action";
+      id: string;
+      createdAt: number;
+      call: ActionCall;
+    };
 
 type ClientSecretResponse = {
   clientSecret?: string;
   expiresAt?: number;
   model?: string;
   voice?: string;
+  realtimeInstructions?: string;
+  transcription?: {
+    model: string;
+    language: string;
+    prompt: string;
+  };
+  promptSource?: "langfuse" | "fallback";
   error?: string;
 };
 
 const VOICES = ["marin", "cedar", "coral", "verse"] as const;
 
-const agentInstructions =
-  "Eres una IA de voz en tiempo real. Conversas en espanol de forma clara, natural y breve. Si el usuario mezcla idiomas, sigue su idioma. Mantienes respuestas utiles y conversacionales.";
+const fallbackAgentInstructions =
+  "Eres un asistente de voz generico en tiempo real. Responde en espanol claro, calido y breve.";
 
 function appendDraft(
   drafts: Record<string, TranscriptEntry>,
@@ -114,8 +138,53 @@ function readTransportError(event: TransportEvent) {
   return "El transporte realtime reporto un error.";
 }
 
+function stringifyForInstruction(value: unknown) {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return "null";
+  }
+}
+
+function buildHumanActionResultInstruction(call: ActionCall) {
+  const result = stringifyForInstruction(call.result);
+
+  if (call.status === "cancelled") {
+    return `Mensaje interno de la interfaz: el usuario cancelo la action human-in-the-loop ${call.name}. Resultado: ${result}. Responde por voz de forma breve, reconoce la cancelacion y no continues con esa operacion. No menciones que este es un mensaje interno.`;
+  }
+
+  return `Mensaje interno de la interfaz: el usuario completo la action human-in-the-loop ${call.name}. Resultado: ${result}. Responde por voz de forma breve y continua con el flujo usando estos datos. No menciones que este es un mensaje interno.`;
+}
+
+function sendHiddenRealtimeInstruction(
+  session: RealtimeSession,
+  instruction: string
+) {
+  session.transport.sendEvent({
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "system",
+      content: [
+        {
+          type: "input_text",
+          text: instruction
+        }
+      ]
+    }
+  });
+
+  if (session.transport.requestResponse) {
+    session.transport.requestResponse();
+    return;
+  }
+
+  session.transport.sendEvent({ type: "response.create" });
+}
+
 export function RealtimeConsole() {
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const notifiedHumanActionResultsRef = useRef<Set<string>>(new Set());
   const [history, setHistory] = useState<RealtimeItem[]>([]);
   const [drafts, setDrafts] = useState<Record<string, TranscriptEntry>>({});
   const [connection, setConnection] = useState<ConnectionStatus>("idle");
@@ -127,7 +196,10 @@ export function RealtimeConsole() {
   const [sessionMeta, setSessionMeta] = useState<{
     model?: string;
     expiresAt?: number;
+    promptSource?: string;
   }>({});
+  const actionCalls = useActionBridgeStore((state) => state.calls);
+  const clearActions = useActionBridgeStore((state) => state.clearCalls);
 
   const entries = useMemo(() => {
     return mergeHistoryAndDrafts(
@@ -136,18 +208,84 @@ export function RealtimeConsole() {
     ).filter((entry) => entry.text.trim().length > 0);
   }, [drafts, history]);
 
+  const actionAnchors = useMemo(() => getActionAnchors(history), [history]);
+
+  const timelineEntries = useMemo<TimelineEntry[]>(() => {
+    const anchorById = new Map(
+      actionAnchors.map((anchor) => [anchor.id, anchor.createdAt])
+    );
+
+    function getActionPosition(call: ActionCall, index: number) {
+      const anchoredAt =
+        (call.itemId ? anchorById.get(call.itemId) : undefined) ??
+        anchorById.get(call.id);
+
+      if (anchoredAt !== undefined && call.kind === "hitl") {
+        const spokenCta = entries.find(
+          (entry) => entry.role === "assistant" && entry.createdAt > anchoredAt
+        );
+
+        if (spokenCta) {
+          return spokenCta.createdAt + 0.1;
+        }
+      }
+
+      return anchoredAt ?? history.length + index + 1;
+    }
+
+    return [
+      ...entries.map((entry) => ({
+        type: "transcript" as const,
+        id: entry.id,
+        createdAt: entry.createdAt,
+        entry
+      })),
+      ...actionCalls.map((call, index) => {
+        return {
+          type: "action" as const,
+          id: call.id,
+          createdAt: getActionPosition(call, index),
+          call
+        };
+      })
+    ].sort((a, b) => a.createdAt - b.createdAt);
+  }, [actionAnchors, actionCalls, entries, history.length]);
+
   const connected = connection === "connected";
   const busy = connection === "connecting";
 
-  const stop = useCallback(() => {
+  useEffect(() => {
+    if (!connected || !sessionRef.current) {
+      return;
+    }
+
+    for (const call of actionCalls) {
+      const shouldNotify =
+        call.kind === "hitl" &&
+        (call.status === "completed" || call.status === "cancelled") &&
+        !notifiedHumanActionResultsRef.current.has(call.id);
+
+      if (!shouldNotify) {
+        continue;
+      }
+
+      notifiedHumanActionResultsRef.current.add(call.id);
+      sendHiddenRealtimeInstruction(
+        sessionRef.current,
+        buildHumanActionResultInstruction(call)
+      );
+    }
+  }, [actionCalls, connected]);
+
+  function stop() {
     sessionRef.current?.close();
     sessionRef.current = null;
     setConnection("idle");
     setActivity("Desconectado");
     setMuted(false);
-  }, []);
+  }
 
-  const handleTransportEvent = useCallback((event: TransportEvent) => {
+  function handleTransportEvent(event: TransportEvent) {
     const now = Date.now();
     const transportError = readTransportError(event);
 
@@ -238,9 +376,9 @@ export function RealtimeConsole() {
         setActivity("Procesando");
         break;
     }
-  }, []);
+  }
 
-  const start = useCallback(async () => {
+  async function start() {
     setConnection("connecting");
     setActivity("Conectando");
     setError(null);
@@ -261,9 +399,10 @@ export function RealtimeConsole() {
       }
 
       const agent = new RealtimeAgent({
-        name: "Asistente Realtime",
-        instructions: agentInstructions,
-        voice
+        name: "Generic Realtime Assistant",
+        instructions: payload.realtimeInstructions ?? fallbackAgentInstructions,
+        voice,
+        tools: createRealtimeActionTools()
       });
 
       const session = new RealtimeSession(agent, {
@@ -271,6 +410,24 @@ export function RealtimeConsole() {
         model: payload.model ?? "gpt-realtime-1.5",
         config: {
           outputModalities: ["audio"],
+          audio: {
+            input: {
+              transcription: payload.transcription,
+              turnDetection: {
+                type: "semantic_vad",
+                eagerness: "medium",
+                createResponse: true,
+                interruptResponse: true
+              },
+              noiseReduction: {
+                type: "near_field"
+              }
+            },
+            output: {
+              voice,
+              speed: 1
+            }
+          },
           tracing: "auto"
         }
       });
@@ -288,7 +445,8 @@ export function RealtimeConsole() {
       sessionRef.current = session;
       setSessionMeta({
         model: payload.model,
-        expiresAt: payload.expiresAt
+        expiresAt: payload.expiresAt,
+        promptSource: payload.promptSource
       });
 
       await session.connect({
@@ -304,49 +462,48 @@ export function RealtimeConsole() {
       setActivity("Error");
       setError(getErrorMessage(err));
     }
-  }, [handleTransportEvent, voice]);
+  }
 
-  const toggleMute = useCallback(() => {
+  function toggleMute() {
     const nextMuted = !muted;
     sessionRef.current?.mute(nextMuted);
     setMuted(nextMuted);
     setActivity(nextMuted ? "Microfono pausado" : "Escuchando");
-  }, [muted]);
+  }
 
-  const interrupt = useCallback(() => {
+  function interrupt() {
     sessionRef.current?.interrupt();
     setActivity("Respuesta detenida");
-  }, []);
+  }
 
-  const clearHistory = useCallback(() => {
+  function clearHistory() {
     setHistory([]);
     setDrafts({});
+    notifiedHumanActionResultsRef.current.clear();
+    clearActions();
     sessionRef.current?.updateHistory([]);
-  }, []);
+  }
 
-  const sendTextMessage = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
+  function sendTextMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
 
-      const message = textMessage.trim();
+    const message = textMessage.trim();
 
-      if (!message || !sessionRef.current || !connected) {
-        return;
-      }
+    if (!message || !sessionRef.current || !connected) {
+      return;
+    }
 
-      sessionRef.current.sendMessage(message);
-      setTextMessage("");
-      setActivity("Mensaje enviado");
-    },
-    [connected, textMessage]
-  );
+    sessionRef.current.sendMessage(message);
+    setTextMessage("");
+    setActivity("Mensaje enviado");
+  }
 
   return (
     <main className="app-shell">
       <section className="topbar" aria-label="Realtime controls">
         <div>
-          <p className="eyebrow">OpenAI Realtime API</p>
-          <h1>Voice history demo</h1>
+          <p className="eyebrow">Realtime Action Framework</p>
+          <h1>Voz, historial y actions</h1>
         </div>
 
         <div className="status-cluster">
@@ -427,10 +584,42 @@ export function RealtimeConsole() {
             </button>
           </div>
 
+          <section className="action-guide" aria-label="Available actions">
+            <div className="action-guide-header">
+              <ListChecks size={17} />
+              <div>
+                <span>Actions disponibles</span>
+                <strong>{genericActionCatalog.length} ejemplos</strong>
+              </div>
+            </div>
+
+            <div className="action-guide-list">
+              {genericActionCatalog.map((action) => (
+                <article className="action-guide-item" key={action.name}>
+                  <div>
+                    <strong>{action.title}</strong>
+                    <span>{action.kind === "hitl" ? "HITL" : "Vista"}</span>
+                  </div>
+                  <code>{action.name}</code>
+                  <button
+                    type="button"
+                    onClick={() => setTextMessage(action.examplePrompt)}
+                  >
+                    {action.examplePrompt}
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+
           <div className="session-meta">
             <div>
               <span>Modelo</span>
               <strong>{sessionMeta.model ?? "gpt-realtime-1.5"}</strong>
+            </div>
+            <div>
+              <span>Prompts</span>
+              <strong>{sessionMeta.promptSource ?? "pendiente"}</strong>
             </div>
             <div>
               <span>Token</span>
@@ -450,34 +639,41 @@ export function RealtimeConsole() {
           ) : null}
         </aside>
 
-        <section className="history-panel" aria-label="Conversation history">
+        <section className="main-panel" aria-label="Realtime workspace">
+          <section className="history-panel" aria-label="Conversation history">
           <div className="history-header">
             <div>
               <p className="eyebrow">Historial</p>
-              <h2>Tu voz y la IA</h2>
+              <h2>Chat, vistas y aprobaciones</h2>
             </div>
             <Waves size={22} />
           </div>
 
           <div className="timeline" aria-live="polite">
-            {entries.length === 0 ? (
+            {timelineEntries.length === 0 ? (
               <div className="empty-state">
                 <Mic size={28} />
                 <p>Sin historial todavia</p>
               </div>
             ) : (
-              entries.map((entry) => (
-                <article
-                  className={`transcript-item role-${entry.role}`}
-                  key={entry.id}
-                >
-                  <div className="transcript-meta">
-                    <span>{entry.role === "user" ? "Tu" : "IA"}</span>
-                    <span>{entry.status.replace("_", " ")}</span>
+              timelineEntries.map((item) =>
+                item.type === "action" ? (
+                  <div className="action-message" key={item.id}>
+                    <ActionMessage call={item.call} />
                   </div>
-                  <p>{entry.text}</p>
-                </article>
-              ))
+                ) : (
+                  <article
+                    className={`transcript-item role-${item.entry.role}`}
+                    key={item.id}
+                  >
+                    <div className="transcript-meta">
+                      <span>{item.entry.role === "user" ? "Tu" : "IA"}</span>
+                      <span>{item.entry.status.replace("_", " ")}</span>
+                    </div>
+                    <p>{item.entry.text}</p>
+                  </article>
+                )
+              )
             )}
           </div>
 
@@ -493,6 +689,7 @@ export function RealtimeConsole() {
               Enviar
             </button>
           </form>
+          </section>
         </section>
       </section>
     </main>

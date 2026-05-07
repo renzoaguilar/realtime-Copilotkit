@@ -1,6 +1,6 @@
 import type { RealtimeItem } from "@openai/agents/realtime";
 
-export type TranscriptRole = "user" | "assistant" | "system" | "tool";
+export type TranscriptRole = "user" | "assistant";
 
 export type TranscriptEntry = {
   id: string;
@@ -8,6 +8,12 @@ export type TranscriptEntry = {
   text: string;
   status: "in_progress" | "completed" | "incomplete" | "failed";
   source: "history" | "transport";
+  createdAt: number;
+};
+
+export type ActionAnchor = {
+  id: string;
+  name: string;
   createdAt: number;
 };
 
@@ -38,61 +44,41 @@ function extractMessageText(content: MessageContentPart[]) {
 export function normalizeRealtimeHistory(
   history: RealtimeItem[]
 ): TranscriptEntry[] {
-  return history.map((item, index) => {
+  return history.flatMap((item, index) => {
     if (item.type === "message") {
+      if (item.role === "system") {
+        return [];
+      }
+
       const content = item.content as MessageContentPart[];
 
-      return {
-        id: item.itemId,
-        role: item.role,
-        text: extractMessageText(content),
-        status: "status" in item ? item.status : "completed",
-        source: "history",
-        createdAt: index
-      };
+      return [
+        {
+          id: item.itemId,
+          role: item.role,
+          text: extractMessageText(content),
+          status: "status" in item ? item.status : "completed",
+          source: "history",
+          createdAt: index
+        }
+      ];
     }
 
+    return [];
+  });
+}
+
+export function getActionAnchors(history: RealtimeItem[]): ActionAnchor[] {
+  return history.flatMap((item, index) => {
     if (item.type === "function_call") {
-      return {
+      return [{
         id: item.itemId,
-        role: "tool",
-        text: `${item.name}(${item.arguments})`,
-        status: item.status,
-        source: "history",
+        name: item.name,
         createdAt: index
-      };
+      }];
     }
 
-    if (item.type === "mcp_call" || item.type === "mcp_tool_call") {
-      return {
-        id: item.itemId,
-        role: "tool",
-        text: `${item.name}(${item.arguments})`,
-        status: item.status,
-        source: "history",
-        createdAt: index
-      };
-    }
-
-    if (item.type === "mcp_approval_request") {
-      return {
-        id: item.itemId,
-        role: "tool",
-        text: item.name,
-        status: item.approved === false ? "failed" : "in_progress",
-        source: "history",
-        createdAt: index
-      };
-    }
-
-    return {
-      id: item.itemId,
-      role: "tool",
-      text: "Evento realtime",
-      status: "in_progress",
-      source: "history",
-      createdAt: index
-    };
+    return [];
   });
 }
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { loadRuntimePrompts } from "@/lib/prompts/langfuse";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => ({}));
   const voice = typeof body.voice === "string" ? body.voice : "marin";
+  const prompts = await loadRuntimePrompts();
 
   const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
@@ -35,14 +37,14 @@ export async function POST(request: Request) {
       session: {
         type: "realtime",
         model: REALTIME_MODEL,
-        instructions:
-          "Eres una IA de voz en tiempo real. Conversas en espanol de forma clara, natural y breve. Si el usuario mezcla idiomas, sigue su idioma. Mantienes respuestas utiles y conversacionales.",
+        instructions: prompts.realtimeInstructions,
         output_modalities: ["audio"],
         audio: {
           input: {
             transcription: {
               model: TRANSCRIBE_MODEL,
-              language: "es"
+              language: "es",
+              prompt: prompts.transcriptionPrompt
             },
             turn_detection: {
               type: "semantic_vad",
@@ -67,7 +69,14 @@ export async function POST(request: Request) {
       clientSecret: clientSecret.value,
       expiresAt: clientSecret.expires_at,
       model: REALTIME_MODEL,
-      voice
+      voice,
+      realtimeInstructions: prompts.realtimeInstructions,
+      transcription: {
+        model: TRANSCRIBE_MODEL,
+        language: "es",
+        prompt: prompts.transcriptionPrompt
+      },
+      promptSource: prompts.source
     });
   } catch (error) {
     const message =
