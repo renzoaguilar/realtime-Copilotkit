@@ -2,10 +2,9 @@ export type GenericActionKind = "view" | "hitl";
 
 export type GenericActionCatalogItem = {
   name:
-    | "showWorkspaceOverview"
-    | "showItemList"
-    | "collectRequiredInfo"
-    | "confirmOperation";
+    | "showPhonePlanStatus"
+    | "showServiceStatus"
+    | "payServiceDebts";
   kind: GenericActionKind;
   title: string;
   description: string;
@@ -14,40 +13,29 @@ export type GenericActionCatalogItem = {
 
 export const genericActionCatalog = [
   {
-    name: "showWorkspaceOverview",
+    name: "showPhonePlanStatus",
     kind: "view",
-    title: "Resumen visual",
+    title: "Estado de plan",
     description:
-      "Shows a generic visual overview with metrics, status cards and next steps.",
+      "Shows the status of one of the user's three phone lines: two mobile lines and one home line with internet, TV and fixed phone.",
     examplePrompt:
-      "Muéstrame un resumen demo del workspace con tres métricas y próximos pasos."
+      "Quiero ver estado de mi plan del numero 955123456."
   },
   {
-    name: "showItemList",
+    name: "showServiceStatus",
     kind: "view",
-    title: "Lista de elementos",
+    title: "Estado de servicios",
     description:
-      "Shows a generic list of records, tasks, cases, products or any domain item.",
-    examplePrompt:
-      "Muéstrame una lista demo de tareas pendientes con cinco elementos."
+      "Shows the current status of home services: internet, fixed phone and TV.",
+    examplePrompt: "Quiero ver el estado de mis servicios."
   },
   {
-    name: "collectRequiredInfo",
+    name: "payServiceDebts",
     kind: "hitl",
-    title: "Formulario HITL",
+    title: "Pago de deudas",
     description:
-      "Shows a dynamic form and waits for the user to provide missing information.",
-    examplePrompt:
-      "Necesito registrar un contacto demo, pídeme nombre, email y fecha de seguimiento."
-  },
-  {
-    name: "confirmOperation",
-    kind: "hitl",
-    title: "Confirmación HITL",
-    description:
-      "Shows a review card and waits for the user to confirm or cancel before continuing.",
-    examplePrompt:
-      "Antes de publicar una configuración demo, muéstrame una confirmación."
+      "Shows pending service debts and waits for the user to confirm or cancel payment.",
+    examplePrompt: "Quiero pagar los servicios que tengan deudas."
   }
 ] satisfies GenericActionCatalogItem[];
 

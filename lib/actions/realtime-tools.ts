@@ -6,6 +6,17 @@ import {
   pushHumanAction,
   pushViewAction
 } from "@/stores/action-bridge-store";
+import {
+  findPhonePlanLine,
+  getPhonePlanLineOptions
+} from "@/lib/actions/phone-plan-data";
+import {
+  defaultPaymentMethod,
+  formatSolesAmount,
+  getDebtTotal,
+  serviceDebtItems
+} from "@/lib/actions/service-debts-data";
+import { serviceStatusItems } from "@/lib/actions/service-status-data";
 
 type RealtimeToolDetails = {
   toolCall?: {
@@ -21,156 +32,76 @@ function getActionCallOptions(details?: RealtimeToolDetails) {
   };
 }
 
-const metricSchema = z.object({
-  label: z.string().describe("Short metric label."),
-  value: z.string().describe("Metric value formatted for display."),
-  tone: z
-    .enum(["neutral", "positive", "warning", "critical"])
-    .optional()
-    .describe("Visual tone for the metric.")
-});
-
-const detailSchema = z.object({
-  label: z.string(),
-  value: z.string()
-});
-
-const itemSchema = z.object({
-  id: z.string().optional(),
-  title: z.string(),
-  description: z.string().optional(),
-  status: z.string().optional()
-});
-
-const fieldSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  type: z.enum(["text", "number", "email", "date"]).default("text"),
-  required: z.boolean().default(true),
-  placeholder: z.string().optional()
-});
-
-function withDemoItems(input: {
-  title?: string;
-  filterLabel?: string;
-  items?: z.infer<typeof itemSchema>[];
-}) {
-  const items =
-    Array.isArray(input.items) && input.items.length > 0
-      ? input.items
-      : [
-          {
-            title: "Preparar informe semanal",
-            description: "Consolidar avances y pendientes principales.",
-            status: "Pendiente"
-          },
-          {
-            title: "Revisar configuración",
-            description: "Validar cambios antes de publicar.",
-            status: "Pendiente"
-          },
-          {
-            title: "Coordinar reunión",
-            description: "Alinear próximos pasos con el equipo.",
-            status: "Pendiente"
-          },
-          {
-            title: "Actualizar documentación",
-            description: "Registrar decisiones y criterios usados.",
-            status: "Pendiente"
-          },
-          {
-            title: "Cerrar incidencias",
-            description: "Resolver bloqueos críticos del flujo.",
-            status: "Pendiente"
-          }
-        ];
-
-  return {
-    ...input,
-    title: input.title ?? "Tareas pendientes demo",
-    filterLabel: input.filterLabel ?? "Datos de ejemplo",
-    items
-  };
-}
-
 export function createRealtimeActionTools() {
   return [
     tool({
-      name: "showWorkspaceOverview",
+      name: "showPhonePlanStatus",
       description:
-        "Show a generic visual overview with metrics, status and suggested next steps. Use it when a visual summary helps the user.",
+        "Show the status of one of the user's phone plans. The user has exactly three lines: 955123456 is a postpaid mobile plan Max Ilimitado 69.90, 988654321 is a prepaid mobile plan, and 015103000 is the home line with Internet 300 Mbps + TV + fixed phone. Use when the user says things like 'quiero ver estado de mi plan del numero 955123456'.",
       parameters: z.object({
-        title: z.string().default("Resumen"),
-        summary: z.string().optional(),
-        metrics: z.array(metricSchema).default([]),
-        nextSteps: z.array(z.string()).default([])
+        phoneNumber: z
+          .string()
+          .describe("Phone number requested by the user.")
+      }),
+      execute: async (input, _context, details) => {
+        const line = findPhonePlanLine(input.phoneNumber);
+
+        return JSON.stringify(
+          pushViewAction(
+            "showPhonePlanStatus",
+            {
+              requestedNumber: input.phoneNumber,
+              line: line ?? null,
+              availableLines: line ? [] : getPhonePlanLineOptions(),
+              notFoundMessage: line
+                ? ""
+                : "No encontre una linea asociada a ese numero."
+            },
+            getActionCallOptions(details)
+          )
+        );
+      }
+    }),
+    tool({
+      name: "showServiceStatus",
+      description:
+        "Show a visual status card for the user's home services. Use when the user asks 'estado de mis servicios', 'estado del internet, telefono y tv', or asks to see whether services are OK or failing.",
+      parameters: z.object({
+        title: z.string().default("Estado de tus servicios")
       }),
       execute: async (input, _context, details) => {
         return JSON.stringify(
           pushViewAction(
-            "showWorkspaceOverview",
-            input,
+            "showServiceStatus",
+            {
+              title: input.title,
+              services: serviceStatusItems
+            },
             getActionCallOptions(details)
           )
         );
       }
     }),
     tool({
-      name: "showItemList",
+      name: "payServiceDebts",
       description:
-        "Show a generic list of items such as records, tasks, cases, products or tickets. If the user asks for a demo list and no data source is available, create clearly demo items.",
+        "Start a human-in-the-loop payment flow for pending service debts. Use when the user asks to pay services with debts, pay pending receipts, or settle service bills. After the tool returns status waiting, speak the returned spokenCta and wait for the UI result before continuing.",
       parameters: z.object({
-        title: z.string().default("Elementos"),
-        filterLabel: z.string().optional(),
-        items: z.array(itemSchema).default([])
+        title: z.string().default("Paga tus deudas pendientes")
       }),
       execute: async (input, _context, details) => {
-        return JSON.stringify(
-          pushViewAction(
-            "showItemList",
-            withDemoItems(input),
-            getActionCallOptions(details)
-          )
-        );
-      }
-    }),
-    tool({
-      name: "collectRequiredInfo",
-      description:
-        "Show a visual form for missing information. After the tool returns status waiting, speak the returned spokenCta and wait for the UI result before continuing.",
-      parameters: z.object({
-        title: z.string().default("Completar informacion"),
-        description: z.string().optional(),
-        fields: z.array(fieldSchema).min(1),
-        submitLabel: z.string().default("Enviar")
-      }),
-      execute: async (input, _context, details) => {
+        const total = getDebtTotal(serviceDebtItems);
+
         return JSON.stringify(
           pushHumanAction(
-            "collectRequiredInfo",
-            input,
-            getActionCallOptions(details)
-          )
-        );
-      }
-    }),
-    tool({
-      name: "confirmOperation",
-      description:
-        "Show a visual confirmation request. After the tool returns status waiting, speak the returned spokenCta and wait for the UI result before continuing.",
-      parameters: z.object({
-        title: z.string().default("Confirmar operacion"),
-        description: z.string().optional(),
-        details: z.array(detailSchema).default([]),
-        confirmLabel: z.string().default("Confirmar"),
-        cancelLabel: z.string().default("Cancelar")
-      }),
-      execute: async (input, _context, details) => {
-        return JSON.stringify(
-          pushHumanAction(
-            "confirmOperation",
-            input,
+            "payServiceDebts",
+            {
+              title: input.title,
+              debts: serviceDebtItems,
+              total,
+              totalLabel: formatSolesAmount(total),
+              paymentMethod: defaultPaymentMethod
+            },
             getActionCallOptions(details)
           )
         );

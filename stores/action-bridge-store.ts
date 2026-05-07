@@ -70,49 +70,28 @@ function formatNaturalList(items: string[]) {
   return `${cleanItems.slice(0, -1).join(", ")} y ${cleanItems.at(-1)}`;
 }
 
-function getFieldLabels(args: Record<string, unknown>) {
-  if (!Array.isArray(args.fields)) {
-    return [];
-  }
-
-  return args.fields.flatMap((field) => {
-    if (!field || typeof field !== "object") {
-      return [];
-    }
-
-    const maybeField = field as Record<string, unknown>;
-    const label = asText(maybeField.label, asText(maybeField.id));
-
-    if (!label) {
-      return [];
-    }
-
-    return maybeField.required === false ? [] : [label];
-  });
-}
-
-function getDetailSummary(args: Record<string, unknown>) {
-  if (!Array.isArray(args.details)) {
+function getDebtSummary(args: Record<string, unknown>) {
+  if (!Array.isArray(args.debts)) {
     return "";
   }
 
-  const details = args.details.flatMap((detail) => {
-    if (!detail || typeof detail !== "object") {
+  const debts = args.debts.flatMap((debt) => {
+    if (!debt || typeof debt !== "object") {
       return [];
     }
 
-    const maybeDetail = detail as Record<string, unknown>;
-    const label = asText(maybeDetail.label);
-    const value = asText(maybeDetail.value);
+    const maybeDebt = debt as Record<string, unknown>;
+    const service = asText(maybeDebt.serviceLabel, "servicio");
+    const amount = asText(maybeDebt.amountLabel);
 
-    if (!label || !value) {
+    if (!amount) {
       return [];
     }
 
-    return [`${label}: ${value}`];
+    return [`${service} por ${amount}`];
   });
 
-  return formatNaturalList(details);
+  return formatNaturalList(debts);
 }
 
 export const useActionBridgeStore = create<ActionBridgeState>((set) => ({
@@ -161,34 +140,16 @@ export function pushViewAction(
 }
 
 function getHumanActionSpokenCta(name: string, args: Record<string, unknown>) {
-  if (name === "collectRequiredInfo") {
-    const title = asText(args.title, "el formulario");
-    const description = asText(args.description);
-    const fields = formatNaturalList(getFieldLabels(args));
-    const intro = description
-      ? `Abri ${title}. ${description}`
-      : `Abri ${title}.`;
+  if (name === "payServiceDebts") {
+    const title = asText(args.title, "el pago de servicios");
+    const debts = getDebtSummary(args);
+    const total = asText(args.totalLabel);
 
-    if (fields) {
-      return `${intro} Completa estos campos: ${fields}. Luego presiona enviar para que pueda continuar.`;
+    if (debts && total) {
+      return `Abri ${title}. Tienes pendiente ${debts}, total ${total}. Revisa la informacion y presiona pagar ahora o cancelar.`;
     }
 
-    return `${intro} Completa la informacion solicitada y presiona enviar para que pueda continuar.`;
-  }
-
-  if (name === "confirmOperation") {
-    const title = asText(args.title, "la operacion");
-    const description = asText(args.description);
-    const details = getDetailSummary(args);
-    const intro = description
-      ? `Abri ${title}. ${description}`
-      : `Abri ${title}.`;
-
-    if (details) {
-      return `${intro} Revisa estos detalles: ${details}. Luego confirma o cancela para que pueda continuar.`;
-    }
-
-    return `${intro} Revisa la informacion y elige confirmar o cancelar para que pueda continuar.`;
+    return `Abri ${title}. Revisa las deudas pendientes y presiona pagar ahora o cancelar.`;
   }
 
   return "Te acabo de mostrar una accion que necesita tu respuesta. Completala para que pueda continuar.";
